@@ -1,74 +1,47 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
-
 import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
   sendPasswordResetEmail,
   onAuthStateChanged,
-  signOut,
-  setPersistence,
-  browserLocalPersistence
+  signOut
 } from "firebase/auth";
 
 import {
-  collection,
-  doc,
-  getDoc,
-  getDocs,
-  setDoc,
-  addDoc,
-  query,
-  where,
-  orderBy,
-  onSnapshot,
-  serverTimestamp,
-  updateDoc,
-  limit,
-  startAt,
-  endAt
+  collection, doc, getDoc, getDocs, setDoc, addDoc, query,
+  where, orderBy, onSnapshot, serverTimestamp, updateDoc, limit
 } from "firebase/firestore";
 
 import { auth, db } from "./firebase";
 
 import {
-  MessageCircle,
-  Send,
-  LogOut,
-  Search,
-  UserRound,
-  ArrowRight,
-  Check,
-  LoaderCircle,
-  Mail,
-  Lock
+  MessageCircle, Send, LogOut, Search, UserRound,
+  ArrowRight, Check, LoaderCircle, Mail, Lock
 } from "lucide-react";
 
-function readableError(error) {
+const readableError = (error) => {
   const code = error?.code || "";
 
   const messages = {
-    "auth/email-already-in-use": "هذا البريد مسجل بالفعل.",
+    "auth/email-already-in-use": "هذا البريد مسجل بالفعل. حاول تسجيل الدخول.",
     "auth/invalid-email": "البريد الإلكتروني غير صحيح.",
     "auth/weak-password": "كلمة المرور يجب أن تكون 6 أحرف على الأقل.",
-    "auth/user-not-found": "لا يوجد حساب بهذا البريد.",
+    "auth/user-not-found": "لا يوجد حساب بهذا البريد الإلكتروني.",
     "auth/wrong-password": "كلمة المرور غير صحيحة.",
-    "auth/invalid-credential": "البريد أو كلمة المرور غير صحيحة.",
-    "auth/operation-not-allowed": "Firebase يرفض طريقة المصادقة. تحقق من مزود Email/Password في المشروع المستخدم.",
-    "auth/too-many-requests": "محاولات كثيرة. حاول لاحقاً.",
-    "auth/network-request-failed": "تحقق من اتصال الإنترنت.",
-    "permission-denied": "لا توجد صلاحيات كافية في Firestore.",
-    "failed-precondition": "هناك مشكلة في إعدادات قاعدة البيانات."
+    "auth/invalid-credential": "البريد الإلكتروني أو كلمة المرور غير صحيحة.",
+    "auth/too-many-requests": "محاولات كثيرة. انتظر قليلاً ثم حاول مجدداً.",
+    "auth/network-request-failed": "تعذر الاتصال بالإنترنت.",
+    "permission-denied": "صلاحيات قاعدة البيانات تمنع هذه العملية. راجع قواعد Firestore."
   };
 
   return messages[code] || error?.message || "حدث خطأ غير متوقع.";
-}
+};
 
 export default function App() {
   const [user, setUser] = useState(null);
   const [authReady, setAuthReady] = useState(false);
   const [profile, setProfile] = useState(null);
-  const [profileLoading, setProfileLoading] = useState(false);
 
   const [authMode, setAuthMode] = useState("login");
   const [email, setEmail] = useState("");
@@ -87,69 +60,116 @@ export default function App() {
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-
   const messagesEndRef = useRef(null);
 
-  const projectId = auth.app.options.projectId;
-
-  // مراقبة تسجيل الدخول وتحميل الملف الشخصي
   useEffect(() => {
-    let active = true;
-
-    const unsubscribe = onAuthStateChanged(auth, async (current) => {
-      if (!active) return;
-
-      setAuthReady(false);
-      setError("");
+    return onAuthStateChanged(auth, async (current) => {
       setUser(current);
-      setProfile(null);
+      setAuthReady(true);
+      setError("");
 
-      if (!current) {
+      if (current) {
+        try {
+          const snap = await getDoc(doc(db, "profiles", current.uid));
+          setProfile(snap.exists() ? snap.data() : null);
+        } catch (e) {
+          setError(readableError(e));
+        }
+      } else {
+        setProfile(null);
         setActiveChat(null);
-        setChats([]);
-        setProfiles([]);
-        setAuthReady(true);
-        return;
-      }
-
-      setProfileLoading(true);
-
-      try {
-        const profileRef = doc(db, "profiles", current.uid);
-        const snap = await getDoc(profileRef);
-
-        if (!active) return;
-
-        if (snap.exists()) {
-          setProfile(snap.data());
-        } else {
-          setProfile(null);
-        }
-      } catch (e) {
-        if (active) {
-          setProfile(null);
-          setError(
-            `${readableError(e)} | المشروع: ${projectId}`
-          );
-        }
-      } finally {
-        if (active) {
-          setProfileLoading(false);
-          setAuthReady(true);
-        }
       }
     });
+  }, []);
 
-    return () => {
-      active = false;
-      unsubscribe();
-    };
-  }, [projectId]);
+  useEffect(() => {
+    if (!user || !profile) return;
 
-  // تسجيل الدخول وإنشاء الحساب
+    const q = query(
+      collection(db, "chats"),
+      where("members", "array-contains", user.uid)
+    );
+
+    return onSnapshot(q, async (snapshot) => {
+      const items = await Promise.all(
+        snapshot.docs.map(async (chatDoc) => {
+          const data = chatDoc.data();
+          const otherId = data.members.find((id) => id !== user.uid);
+          const otherSnap = await getDoc(doc(db, "profiles", otherId));
+
+          return {
+            id: chatDoc.id,
+            ...data,
+            otherId,
+            other: otherSnap.exists()
+              ? otherSnap.data()
+              : { displayName: "مستخدم" }
+          };
+        })
+      );
+
+      items.sort(
+        (a, b) =>
+          (b.updatedAt?.seconds || 0) -
+          (a.updatedAt?.seconds || 0)
+      );
+
+      setChats(items);
+    }, (e) => setError(readableError(e)));
+  }, [user, profile]);
+
+  useEffect(() => {
+    if (!user || !profile) return;
+
+    const q = query(collection(db, "profiles"), limit(100));
+
+    return onSnapshot(q, (snapshot) => {
+      setProfiles(
+        snapshot.docs
+          .filter((d) => d.id !== user.uid)
+          .map((d) => ({ id: d.id, ...d.data() }))
+      );
+    }, (e) => setError(readableError(e)));
+  }, [user, profile]);
+
+  useEffect(() => {
+    if (!activeChat || !user) {
+      setMessages([]);
+      return;
+    }
+
+    const q = query(
+      collection(db, "chats", activeChat.id, "messages"),
+      orderBy("createdAt", "asc"),
+      limit(300)
+    );
+
+    return onSnapshot(q, (snapshot) => {
+      setMessages(
+        snapshot.docs.map((d) => ({ id: d.id, ...d.data() }))
+      );
+
+      setTimeout(() => {
+        messagesEndRef.current?.scrollIntoView({
+          behavior: "smooth"
+        });
+      }, 50);
+    }, (e) => setError(readableError(e)));
+  }, [activeChat, user]);
+
+  const filteredProfiles = useMemo(() => {
+    const term = searchText.trim().toLowerCase();
+
+    if (!term) return [];
+
+    return profiles.filter((p) =>
+      (p.displayName || "").toLowerCase().includes(term) ||
+      (p.username || "").toLowerCase().includes(term)
+    );
+  }, [profiles, searchText]);
+
   async function handleAuth(e) {
     e.preventDefault();
-
     setBusy(true);
     setError("");
 
@@ -159,8 +179,6 @@ export default function App() {
       if (!cleanEmail || !password) {
         throw new Error("أدخل البريد الإلكتروني وكلمة المرور.");
       }
-
-      await setPersistence(auth, browserLocalPersistence);
 
       if (authMode === "register") {
         if (password.length < 6) {
@@ -179,16 +197,13 @@ export default function App() {
           password
         );
       }
-    } catch (e) {
-      setError(
-        `${readableError(e)} | رمز الخطأ: ${e?.code || "غير معروف"} | مشروع Firebase: ${projectId}`
-      );
+    } catch (e2) {
+      setError(readableError(e2));
     } finally {
       setBusy(false);
     }
   }
 
-  // استعادة كلمة المرور
   async function resetPassword() {
     setError("");
     setBusy(true);
@@ -201,29 +216,21 @@ export default function App() {
       }
 
       await sendPasswordResetEmail(auth, cleanEmail);
-
       setError("تم إرسال رابط استعادة كلمة المرور إلى بريدك الإلكتروني.");
     } catch (e) {
-      setError(
-        `${readableError(e)} | المشروع: ${projectId}`
-      );
+      setError(readableError(e));
     } finally {
       setBusy(false);
     }
   }
 
-  // حفظ الملف الشخصي
   async function saveProfile(e) {
     e.preventDefault();
-
-    if (!user) return;
-
     setBusy(true);
     setError("");
 
     try {
       const cleanName = displayName.trim();
-
       const cleanUsername = username
         .trim()
         .toLowerCase()
@@ -239,8 +246,6 @@ export default function App() {
         );
       }
 
-      const profileRef = doc(db, "profiles", user.uid);
-
       const profileData = {
         displayName: cleanName,
         username: cleanUsername,
@@ -249,204 +254,34 @@ export default function App() {
         createdAt: serverTimestamp()
       };
 
-      await setDoc(profileRef, profileData, { merge: true });
+      await setDoc(
+        doc(db, "profiles", user.uid),
+        profileData
+      );
 
       await setDoc(
         doc(db, "users", user.uid),
         {
           email: user.email || "",
-          updatedAt: serverTimestamp()
+          createdAt: serverTimestamp()
         },
         { merge: true }
       );
 
-      const savedSnap = await getDoc(profileRef);
-
-      if (!savedSnap.exists()) {
-        throw new Error("لم يتم العثور على الملف الشخصي بعد الحفظ.");
-      }
-
-      setProfile(savedSnap.data());
-      setError("");
-    } catch (e) {
-      setError(
-        `${readableError(e)} | رمز الخطأ: ${e?.code || "غير معروف"} | المشروع: ${projectId}`
-      );
+      setProfile({
+        displayName: cleanName,
+        username: cleanUsername,
+        email: user.email || "",
+        photoURL: ""
+      });
+    } catch (e2) {
+      setError(readableError(e2));
     } finally {
       setBusy(false);
     }
   }
 
-  // البحث عن المستخدمين
-  useEffect(() => {
-    if (!user || !profile) {
-      setProfiles([]);
-      return;
-    }
-
-    const term = searchText.trim();
-
-    if (term.length < 2) {
-      setProfiles([]);
-      return;
-    }
-
-    let cancelled = false;
-
-    async function searchProfiles() {
-      try {
-        const cleanTerm = term.replace(/^@/, "");
-
-        const usernameQuery = query(
-          collection(db, "profiles"),
-          orderBy("username"),
-          startAt(cleanTerm.toLowerCase()),
-          endAt(cleanTerm.toLowerCase() + "\uf8ff"),
-          limit(30)
-        );
-
-        const nameQuery = query(
-          collection(db, "profiles"),
-          orderBy("displayName"),
-          startAt(cleanTerm),
-          endAt(cleanTerm + "\uf8ff"),
-          limit(30)
-        );
-
-        const [usernameResults, nameResults] = await Promise.all([
-          getDocs(usernameQuery),
-          getDocs(nameQuery)
-        ]);
-
-        const combined = new Map();
-
-        [...usernameResults.docs, ...nameResults.docs].forEach((d) => {
-          if (d.id !== user.uid) {
-            combined.set(d.id, {
-              id: d.id,
-              ...d.data()
-            });
-          }
-        });
-
-        if (!cancelled) {
-          setProfiles([...combined.values()]);
-        }
-      } catch (e) {
-        if (!cancelled) {
-          setProfiles([]);
-          setError(
-            `${readableError(e)} | رمز الخطأ: ${e?.code || "غير معروف"}`
-          );
-        }
-      }
-    }
-
-    searchProfiles();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [user, profile, searchText]);
-
-  // تحميل المحادثات
-  useEffect(() => {
-    if (!user || !profile) {
-      setChats([]);
-      return;
-    }
-
-    const q = query(
-      collection(db, "chats"),
-      where("members", "array-contains", user.uid)
-    );
-
-    return onSnapshot(
-      q,
-      async (snapshot) => {
-        try {
-          const items = await Promise.all(
-            snapshot.docs.map(async (chatDoc) => {
-              const data = chatDoc.data();
-
-              const otherId = data.members.find(
-                (id) => id !== user.uid
-              );
-
-              if (!otherId) return null;
-
-              const otherSnap = await getDoc(
-                doc(db, "profiles", otherId)
-              );
-
-              return {
-                id: chatDoc.id,
-                ...data,
-                otherId,
-                other: otherSnap.exists()
-                  ? otherSnap.data()
-                  : { displayName: "مستخدم" }
-              };
-            })
-          );
-
-          const validItems = items.filter(Boolean);
-
-          validItems.sort(
-            (a, b) =>
-              (b.updatedAt?.seconds || 0) -
-              (a.updatedAt?.seconds || 0)
-          );
-
-          setChats(validItems);
-        } catch (e) {
-          setError(readableError(e));
-        }
-      },
-      (e) => setError(readableError(e))
-    );
-  }, [user, profile]);
-
-  // تحميل الرسائل
-  useEffect(() => {
-    if (!activeChat || !user) {
-      setMessages([]);
-      return;
-    }
-
-    const q = query(
-      collection(db, "chats", activeChat.id, "messages"),
-      orderBy("createdAt", "asc"),
-      limit(300)
-    );
-
-    return onSnapshot(
-      q,
-      (snapshot) => {
-        setMessages(
-          snapshot.docs.map((d) => ({
-            id: d.id,
-            ...d.data()
-          }))
-        );
-
-        messagesEndRef.current?.scrollIntoView({
-          behavior: "smooth"
-        });
-      },
-      (e) => setError(readableError(e))
-    );
-  }, [activeChat, user]);
-
-  const filteredProfiles = useMemo(
-    () => profiles,
-    [profiles]
-  );
-
-  // فتح محادثة
   async function openChat(person) {
-    if (!user || !person?.id) return;
-
     setError("");
     setBusy(true);
 
@@ -462,7 +297,6 @@ export default function App() {
 
       const existing = existingSnapshot.docs.find((d) => {
         const list = d.data().members || [];
-
         return list.length === 2 && list.includes(person.id);
       });
 
@@ -501,13 +335,12 @@ export default function App() {
     }
   }
 
-  // إرسال رسالة
   async function sendMessage(e) {
     e.preventDefault();
 
     const text = messageText.trim();
 
-    if (!text || !activeChat || !user || busy) return;
+    if (!text || !activeChat || busy) return;
 
     setMessageText("");
     setBusy(true);
@@ -531,15 +364,15 @@ export default function App() {
           updatedAt: serverTimestamp()
         }
       );
-    } catch (e) {
+    } catch (e2) {
       setMessageText(text);
-      setError(readableError(e));
+      setError(readableError(e2));
     } finally {
       setBusy(false);
     }
   }
 
-  if (!authReady || profileLoading) {
+  if (!authReady) {
     return (
       <div className="center">
         <LoaderCircle className="spin" />
@@ -548,7 +381,6 @@ export default function App() {
     );
   }
 
-  // تسجيل الدخول
   if (!user) {
     return (
       <main className="auth-page">
@@ -558,10 +390,7 @@ export default function App() {
           </div>
 
           <h1>سوداشات</h1>
-
-          <p className="muted">
-            تواصل مع أهلك وأصدقائك
-          </p>
+          <p className="muted">تواصل مع أهلك وأصدقائك</p>
 
           <h2>
             {authMode === "register"
@@ -574,7 +403,6 @@ export default function App() {
 
             <div className="field">
               <Mail size={18} />
-
               <input
                 type="email"
                 dir="ltr"
@@ -590,7 +418,6 @@ export default function App() {
 
             <div className="field">
               <Lock size={18} />
-
               <input
                 type="password"
                 dir="ltr"
@@ -642,21 +469,12 @@ export default function App() {
               : "لديك حساب بالفعل؟ سجّل الدخول"}
           </button>
 
-          {error && (
-            <p className="error">
-              {error}
-            </p>
-          )}
-
-          <small className="muted">
-            مشروع Firebase: {projectId}
-          </small>
+          {error && <p className="error">{error}</p>}
         </section>
       </main>
     );
   }
 
-  // إكمال الملف الشخصي
   if (!profile) {
     return (
       <main className="auth-page">
@@ -704,16 +522,11 @@ export default function App() {
           </button>
 
           {error && <p className="error">{error}</p>}
-
-          <small className="muted">
-            مشروع Firebase: {projectId}
-          </small>
         </section>
       </main>
     );
   }
 
-  // واجهة التطبيق
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -721,13 +534,11 @@ export default function App() {
           <div className="small-mark">
             <MessageCircle size={20} />
           </div>
-
           <strong>سوداشات</strong>
         </div>
 
         <div className="account">
           <span>{profile.displayName}</span>
-
           <button
             title="تسجيل الخروج"
             onClick={() => signOut(auth)}
@@ -738,11 +549,7 @@ export default function App() {
       </header>
 
       <div className="workspace">
-        <aside
-          className={`sidebar ${
-            activeChat ? "mobile-hidden" : ""
-          }`}
-        >
+        <aside className={`sidebar ${activeChat ? "mobile-hidden" : ""}`}>
           <div className="sidebar-heading">
             <h2>المحادثات</h2>
             <span className="online-dot" />
@@ -750,7 +557,6 @@ export default function App() {
 
           <div className="search-box">
             <Search size={18} />
-
             <input
               value={searchText}
               onChange={(e) => setSearchText(e.target.value)}
@@ -760,9 +566,7 @@ export default function App() {
 
           {searchText.trim() ? (
             <div className="people-list">
-              <p className="section-label">
-                نتائج البحث
-              </p>
+              <p className="section-label">نتائج البحث</p>
 
               {filteredProfiles.map((p) => (
                 <button
@@ -775,8 +579,8 @@ export default function App() {
                   </div>
 
                   <div className="person-info">
-                    <b>{p.displayName || "مستخدم"}</b>
-                    <small>@{p.username || ""}</small>
+                    <b>{p.displayName}</b>
+                    <small>@{p.username}</small>
                   </div>
 
                   <MessageCircle size={18} />
@@ -804,13 +608,8 @@ export default function App() {
                   </div>
 
                   <div className="person-info">
-                    <b>
-                      {chat.other?.displayName || "مستخدم"}
-                    </b>
-
-                    <small>
-                      {chat.lastMessage || "ابدأ المحادثة"}
-                    </small>
+                    <b>{chat.other?.displayName || "مستخدم"}</b>
+                    <small>{chat.lastMessage || "ابدأ المحادثة"}</small>
                   </div>
                 </button>
               ))}
@@ -819,9 +618,7 @@ export default function App() {
                 <div className="empty-state">
                   <MessageCircle size={32} />
                   <p>لا توجد محادثات بعد</p>
-                  <small>
-                    ابحث عن شخص لبدء محادثة جديدة
-                  </small>
+                  <small>ابحث عن شخص لبدء محادثة جديدة</small>
                 </div>
               )}
             </div>
@@ -841,11 +638,7 @@ export default function App() {
           </div>
         </aside>
 
-        <section
-          className={`conversation ${
-            !activeChat ? "no-chat" : ""
-          }`}
-        >
+        <section className={`conversation ${!activeChat ? "no-chat" : ""}`}>
           {activeChat ? (
             <>
               <div className="conversation-header">
@@ -861,13 +654,8 @@ export default function App() {
                 </div>
 
                 <div>
-                  <b>
-                    {activeChat.other?.displayName || "مستخدم"}
-                  </b>
-
-                  <small>
-                    @{activeChat.other?.username || ""}
-                  </small>
+                  <b>{activeChat.other?.displayName || "مستخدم"}</b>
+                  <small>@{activeChat.other?.username || ""}</small>
                 </div>
               </div>
 
@@ -885,10 +673,7 @@ export default function App() {
                       {m.createdAt?.toDate
                         ? m.createdAt.toDate().toLocaleTimeString(
                             "ar",
-                            {
-                              hour: "2-digit",
-                              minute: "2-digit"
-                            }
+                            { hour: "2-digit", minute: "2-digit" }
                           )
                         : "..."}
                     </small>
@@ -897,23 +682,19 @@ export default function App() {
 
                 {!messages.length && (
                   <div className="first-message">
-                    هذه بداية محادثتك مع{" "}
-                    {activeChat.other?.displayName}
+                    هذه بداية محادثتك مع {activeChat.other?.displayName}
                   </div>
                 )}
 
                 <div ref={messagesEndRef} />
               </div>
 
-              <form
-                className="composer"
-                onSubmit={sendMessage}
-              >
+              <form className="composer" onSubmit={sendMessage}>
                 <input
                   value={messageText}
                   onChange={(e) => setMessageText(e.target.value)}
                   placeholder="اكتب رسالتك..."
-                  maxLength={5000}
+                  maxLength="5000"
                 />
 
                 <button
@@ -932,10 +713,7 @@ export default function App() {
               </div>
 
               <h2>مرحباً بك في سوداشات</h2>
-
-              <p>
-                اختر محادثة أو ابحث عن مستخدم لبدء التواصل.
-              </p>
+              <p>اختر محادثة أو ابحث عن مستخدم لبدء التواصل.</p>
             </div>
           )}
         </section>
@@ -944,10 +722,7 @@ export default function App() {
       {error && (
         <div className="toast" role="alert">
           {error}
-
-          <button onClick={() => setError("")}>
-            ×
-          </button>
+          <button onClick={() => setError("")}>×</button>
         </div>
       )}
     </main>
