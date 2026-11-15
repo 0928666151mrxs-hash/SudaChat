@@ -44,7 +44,7 @@ import {
   Lock
 } from "lucide-react";
 
-const readableError = (error) => {
+function readableError(error) {
   const code = error?.code || "";
 
   const messages = {
@@ -54,6 +54,7 @@ const readableError = (error) => {
     "auth/user-not-found": "لا يوجد حساب بهذا البريد.",
     "auth/wrong-password": "كلمة المرور غير صحيحة.",
     "auth/invalid-credential": "البريد أو كلمة المرور غير صحيحة.",
+    "auth/operation-not-allowed": "Firebase يرفض طريقة المصادقة. تحقق من مزود Email/Password في المشروع المستخدم.",
     "auth/too-many-requests": "محاولات كثيرة. حاول لاحقاً.",
     "auth/network-request-failed": "تحقق من اتصال الإنترنت.",
     "permission-denied": "لا توجد صلاحيات كافية في Firestore.",
@@ -61,12 +62,13 @@ const readableError = (error) => {
   };
 
   return messages[code] || error?.message || "حدث خطأ غير متوقع.";
-};
+}
 
 export default function App() {
   const [user, setUser] = useState(null);
   const [authReady, setAuthReady] = useState(false);
   const [profile, setProfile] = useState(null);
+  const [profileLoading, setProfileLoading] = useState(false);
 
   const [authMode, setAuthMode] = useState("login");
   const [email, setEmail] = useState("");
@@ -88,35 +90,271 @@ export default function App() {
 
   const messagesEndRef = useRef(null);
 
-  // متابعة حالة تسجيل الدخول
+  const projectId = auth.app.options.projectId;
+
+  // مراقبة تسجيل الدخول وتحميل الملف الشخصي
   useEffect(() => {
-    return onAuthStateChanged(auth, async (current) => {
-      setUser(current);
-      setAuthReady(true);
+    let active = true;
+
+    const unsubscribe = onAuthStateChanged(auth, async (current) => {
+      if (!active) return;
+
+      setAuthReady(false);
       setError("");
+      setUser(current);
+      setProfile(null);
 
-      if (current) {
-        try {
-          const snap = await getDoc(
-            doc(db, "profiles", current.uid)
-          );
-
-          setProfile(snap.exists() ? snap.data() : null);
-        } catch (e) {
-          setError(readableError(e));
-        }
-      } else {
-        setProfile(null);
+      if (!current) {
         setActiveChat(null);
         setChats([]);
         setProfiles([]);
+        setAuthReady(true);
+        return;
+      }
+
+      setProfileLoading(true);
+
+      try {
+        const profileRef = doc(db, "profiles", current.uid);
+        const snap = await getDoc(profileRef);
+
+        if (!active) return;
+
+        if (snap.exists()) {
+          setProfile(snap.data());
+        } else {
+          setProfile(null);
+        }
+      } catch (e) {
+        if (active) {
+          setProfile(null);
+          setError(
+            `${readableError(e)} | المشروع: ${projectId}`
+          );
+        }
+      } finally {
+        if (active) {
+          setProfileLoading(false);
+          setAuthReady(true);
+        }
       }
     });
-  }, []);
+
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [projectId]);
+
+  // تسجيل الدخول وإنشاء الحساب
+  async function handleAuth(e) {
+    e.preventDefault();
+
+    setBusy(true);
+    setError("");
+
+    try {
+      const cleanEmail = email.trim().toLowerCase();
+
+      if (!cleanEmail || !password) {
+        throw new Error("أدخل البريد الإلكتروني وكلمة المرور.");
+      }
+
+      await setPersistence(auth, browserLocalPersistence);
+
+      if (authMode === "register") {
+        if (password.length < 6) {
+          throw new Error("كلمة المرور يجب أن تكون 6 أحرف على الأقل.");
+        }
+
+        await createUserWithEmailAndPassword(
+          auth,
+          cleanEmail,
+          password
+        );
+      } else {
+        await signInWithEmailAndPassword(
+          auth,
+          cleanEmail,
+          password
+        );
+      }
+    } catch (e) {
+      setError(
+        `${readableError(e)} | رمز الخطأ: ${e?.code || "غير معروف"} | مشروع Firebase: ${projectId}`
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // استعادة كلمة المرور
+  async function resetPassword() {
+    setError("");
+    setBusy(true);
+
+    try {
+      const cleanEmail = email.trim().toLowerCase();
+
+      if (!cleanEmail) {
+        throw new Error("اكتب بريدك الإلكتروني أولاً.");
+      }
+
+      await sendPasswordResetEmail(auth, cleanEmail);
+
+      setError("تم إرسال رابط استعادة كلمة المرور إلى بريدك الإلكتروني.");
+    } catch (e) {
+      setError(
+        `${readableError(e)} | المشروع: ${projectId}`
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // حفظ الملف الشخصي
+  async function saveProfile(e) {
+    e.preventDefault();
+
+    if (!user) return;
+
+    setBusy(true);
+    setError("");
+
+    try {
+      const cleanName = displayName.trim();
+
+      const cleanUsername = username
+        .trim()
+        .toLowerCase()
+        .replace(/^@/, "");
+
+      if (cleanName.length < 2) {
+        throw new Error("اكتب اسماً من حرفين على الأقل.");
+      }
+
+      if (!/^[a-z0-9_]{3,20}$/.test(cleanUsername)) {
+        throw new Error(
+          "اسم المستخدم يجب أن يكون 3-20 حرفاً إنجليزياً أو رقماً أو _."
+        );
+      }
+
+      const profileRef = doc(db, "profiles", user.uid);
+
+      const profileData = {
+        displayName: cleanName,
+        username: cleanUsername,
+        email: user.email || "",
+        photoURL: "",
+        createdAt: serverTimestamp()
+      };
+
+      await setDoc(profileRef, profileData, { merge: true });
+
+      await setDoc(
+        doc(db, "users", user.uid),
+        {
+          email: user.email || "",
+          updatedAt: serverTimestamp()
+        },
+        { merge: true }
+      );
+
+      const savedSnap = await getDoc(profileRef);
+
+      if (!savedSnap.exists()) {
+        throw new Error("لم يتم العثور على الملف الشخصي بعد الحفظ.");
+      }
+
+      setProfile(savedSnap.data());
+      setError("");
+    } catch (e) {
+      setError(
+        `${readableError(e)} | رمز الخطأ: ${e?.code || "غير معروف"} | المشروع: ${projectId}`
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // البحث عن المستخدمين
+  useEffect(() => {
+    if (!user || !profile) {
+      setProfiles([]);
+      return;
+    }
+
+    const term = searchText.trim();
+
+    if (term.length < 2) {
+      setProfiles([]);
+      return;
+    }
+
+    let cancelled = false;
+
+    async function searchProfiles() {
+      try {
+        const cleanTerm = term.replace(/^@/, "");
+
+        const usernameQuery = query(
+          collection(db, "profiles"),
+          orderBy("username"),
+          startAt(cleanTerm.toLowerCase()),
+          endAt(cleanTerm.toLowerCase() + "\uf8ff"),
+          limit(30)
+        );
+
+        const nameQuery = query(
+          collection(db, "profiles"),
+          orderBy("displayName"),
+          startAt(cleanTerm),
+          endAt(cleanTerm + "\uf8ff"),
+          limit(30)
+        );
+
+        const [usernameResults, nameResults] = await Promise.all([
+          getDocs(usernameQuery),
+          getDocs(nameQuery)
+        ]);
+
+        const combined = new Map();
+
+        [...usernameResults.docs, ...nameResults.docs].forEach((d) => {
+          if (d.id !== user.uid) {
+            combined.set(d.id, {
+              id: d.id,
+              ...d.data()
+            });
+          }
+        });
+
+        if (!cancelled) {
+          setProfiles([...combined.values()]);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setProfiles([]);
+          setError(
+            `${readableError(e)} | رمز الخطأ: ${e?.code || "غير معروف"}`
+          );
+        }
+      }
+    }
+
+    searchProfiles();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user, profile, searchText]);
 
   // تحميل المحادثات
   useEffect(() => {
-    if (!user || !profile) return;
+    if (!user || !profile) {
+      setChats([]);
+      return;
+    }
 
     const q = query(
       collection(db, "chats"),
@@ -169,77 +407,6 @@ export default function App() {
     );
   }, [user, profile]);
 
-  // البحث عن المستخدمين مباشرة في Firestore
-  useEffect(() => {
-    if (!user || !profile) return;
-
-    const term = searchText.trim();
-
-    if (term.length < 2) {
-      setProfiles([]);
-      return;
-    }
-
-    let cancelled = false;
-
-    async function searchProfiles() {
-      try {
-        const cleanTerm = term.replace(/^@/, "");
-
-        const usernameQuery = query(
-          collection(db, "profiles"),
-          orderBy("username"),
-          startAt(cleanTerm.toLowerCase()),
-          endAt(cleanTerm.toLowerCase() + "\uf8ff"),
-          limit(30)
-        );
-
-        const nameQuery = query(
-          collection(db, "profiles"),
-          orderBy("displayName"),
-          startAt(cleanTerm),
-          endAt(cleanTerm + "\uf8ff"),
-          limit(30)
-        );
-
-        const [usernameResults, nameResults] =
-          await Promise.all([
-            getDocs(usernameQuery),
-            getDocs(nameQuery)
-          ]);
-
-        const combined = new Map();
-
-        [
-          ...usernameResults.docs,
-          ...nameResults.docs
-        ].forEach((d) => {
-          if (d.id !== user.uid) {
-            combined.set(d.id, {
-              id: d.id,
-              ...d.data()
-            });
-          }
-        });
-
-        if (!cancelled) {
-          setProfiles([...combined.values()]);
-        }
-      } catch (e) {
-        if (!cancelled) {
-          setProfiles([]);
-          setError(readableError(e));
-        }
-      }
-    }
-
-    searchProfiles();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [user, profile, searchText]);
-
   // تحميل الرسائل
   useEffect(() => {
     if (!activeChat || !user) {
@@ -248,12 +415,7 @@ export default function App() {
     }
 
     const q = query(
-      collection(
-        db,
-        "chats",
-        activeChat.id,
-        "messages"
-      ),
+      collection(db, "chats", activeChat.id, "messages"),
       orderBy("createdAt", "asc"),
       limit(300)
     );
@@ -268,161 +430,23 @@ export default function App() {
           }))
         );
 
-        setTimeout(() => {
-          messagesEndRef.current?.scrollIntoView({
-            behavior: "smooth"
-          });
-        }, 50);
+        messagesEndRef.current?.scrollIntoView({
+          behavior: "smooth"
+        });
       },
       (e) => setError(readableError(e))
     );
   }, [activeChat, user]);
 
-  const filteredProfiles = useMemo(() => {
-    return profiles;
-  }, [profiles]);
-
-  // تسجيل الدخول وإنشاء الحساب
-  async function handleAuth(e) {
-    e.preventDefault();
-
-    setBusy(true);
-    setError("");
-
-    try {
-      const cleanEmail = email.trim().toLowerCase();
-
-      if (!cleanEmail || !password) {
-        throw new Error(
-          "أدخل البريد الإلكتروني وكلمة المرور."
-        );
-      }
-
-      // حفظ جلسة تسجيل الدخول في المتصفح
-      await setPersistence(
-        auth,
-        browserLocalPersistence
-      );
-
-      if (authMode === "register") {
-        if (password.length < 6) {
-          throw new Error(
-            "كلمة المرور يجب أن تكون 6 أحرف على الأقل."
-          );
-        }
-
-        await createUserWithEmailAndPassword(
-          auth,
-          cleanEmail,
-          password
-        );
-      } else {
-        await signInWithEmailAndPassword(
-          auth,
-          cleanEmail,
-          password
-        );
-      }
-    } catch (e2) {
-      setError(readableError(e2));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  // استعادة كلمة المرور
-  async function resetPassword() {
-    setError("");
-    setBusy(true);
-
-    try {
-      const cleanEmail = email.trim().toLowerCase();
-
-      if (!cleanEmail) {
-        throw new Error(
-          "اكتب بريدك الإلكتروني أولاً."
-        );
-      }
-
-      await sendPasswordResetEmail(
-        auth,
-        cleanEmail
-      );
-
-      setError(
-        "تم إرسال رابط استعادة كلمة المرور إلى بريدك الإلكتروني."
-      );
-    } catch (e) {
-      setError(readableError(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  // حفظ الملف الشخصي
-  async function saveProfile(e) {
-    e.preventDefault();
-
-    setBusy(true);
-    setError("");
-
-    try {
-      const cleanName = displayName.trim();
-
-      const cleanUsername = username
-        .trim()
-        .toLowerCase()
-        .replace(/^@/, "");
-
-      if (cleanName.length < 2) {
-        throw new Error(
-          "اكتب اسماً من حرفين على الأقل."
-        );
-      }
-
-      if (!/^[a-z0-9_]{3,20}$/.test(cleanUsername)) {
-        throw new Error(
-          "اسم المستخدم يجب أن يكون 3-20 حرفاً إنجليزياً أو رقماً أو _."
-        );
-      }
-
-      const profileData = {
-        displayName: cleanName,
-        username: cleanUsername,
-        email: user.email || "",
-        photoURL: "",
-        createdAt: serverTimestamp()
-      };
-
-      await setDoc(
-        doc(db, "profiles", user.uid),
-        profileData
-      );
-
-      await setDoc(
-        doc(db, "users", user.uid),
-        {
-          email: user.email || "",
-          createdAt: serverTimestamp()
-        },
-        { merge: true }
-      );
-
-      setProfile({
-        displayName: cleanName,
-        username: cleanUsername,
-        email: user.email || "",
-        photoURL: ""
-      });
-    } catch (e2) {
-      setError(readableError(e2));
-    } finally {
-      setBusy(false);
-    }
-  }
+  const filteredProfiles = useMemo(
+    () => profiles,
+    [profiles]
+  );
 
   // فتح محادثة
   async function openChat(person) {
+    if (!user || !person?.id) return;
+
     setError("");
     setBusy(true);
 
@@ -434,20 +458,13 @@ export default function App() {
         where("members", "array-contains", user.uid)
       );
 
-      const existingSnapshot = await getDocs(
-        existingQuery
-      );
+      const existingSnapshot = await getDocs(existingQuery);
 
-      const existing = existingSnapshot.docs.find(
-        (d) => {
-          const list = d.data().members || [];
+      const existing = existingSnapshot.docs.find((d) => {
+        const list = d.data().members || [];
 
-          return (
-            list.length === 2 &&
-            list.includes(person.id)
-          );
-        }
-      );
+        return list.length === 2 && list.includes(person.id);
+      });
 
       if (existing) {
         setActiveChat({
@@ -490,7 +507,7 @@ export default function App() {
 
     const text = messageText.trim();
 
-    if (!text || !activeChat || busy) return;
+    if (!text || !activeChat || !user || busy) return;
 
     setMessageText("");
     setBusy(true);
@@ -498,12 +515,7 @@ export default function App() {
 
     try {
       await addDoc(
-        collection(
-          db,
-          "chats",
-          activeChat.id,
-          "messages"
-        ),
+        collection(db, "chats", activeChat.id, "messages"),
         {
           senderId: user.uid,
           text,
@@ -519,15 +531,15 @@ export default function App() {
           updatedAt: serverTimestamp()
         }
       );
-    } catch (e2) {
+    } catch (e) {
       setMessageText(text);
-      setError(readableError(e2));
+      setError(readableError(e));
     } finally {
       setBusy(false);
     }
   }
 
-  if (!authReady) {
+  if (!authReady || profileLoading) {
     return (
       <div className="center">
         <LoaderCircle className="spin" />
@@ -536,12 +548,11 @@ export default function App() {
     );
   }
 
-  // شاشة تسجيل الدخول
+  // تسجيل الدخول
   if (!user) {
     return (
       <main className="auth-page">
         <section className="auth-card">
-
           <div className="brand-mark">
             <MessageCircle size={34} />
           </div>
@@ -559,7 +570,6 @@ export default function App() {
           </h2>
 
           <form onSubmit={handleAuth}>
-
             <label>البريد الإلكتروني</label>
 
             <div className="field">
@@ -569,9 +579,7 @@ export default function App() {
                 type="email"
                 dir="ltr"
                 value={email}
-                onChange={(e) =>
-                  setEmail(e.target.value)
-                }
+                onChange={(e) => setEmail(e.target.value)}
                 placeholder="example@gmail.com"
                 autoComplete="email"
                 required
@@ -587,9 +595,7 @@ export default function App() {
                 type="password"
                 dir="ltr"
                 value={password}
-                onChange={(e) =>
-                  setPassword(e.target.value)
-                }
+                onChange={(e) => setPassword(e.target.value)}
                 placeholder="6 أحرف على الأقل"
                 autoComplete={
                   authMode === "register"
@@ -601,17 +607,13 @@ export default function App() {
               />
             </div>
 
-            <button
-              className="primary"
-              disabled={busy}
-            >
+            <button className="primary" disabled={busy}>
               {busy
                 ? "يرجى الانتظار..."
                 : authMode === "register"
                   ? "إنشاء حساب"
                   : "تسجيل الدخول"}
             </button>
-
           </form>
 
           {authMode === "login" && (
@@ -630,11 +632,8 @@ export default function App() {
             className="link-button"
             onClick={() => {
               setAuthMode(
-                authMode === "login"
-                  ? "register"
-                  : "login"
+                authMode === "login" ? "register" : "login"
               );
-
               setError("");
             }}
           >
@@ -644,9 +643,14 @@ export default function App() {
           </button>
 
           {error && (
-            <p className="error">{error}</p>
+            <p className="error">
+              {error}
+            </p>
           )}
 
+          <small className="muted">
+            مشروع Firebase: {projectId}
+          </small>
         </section>
       </main>
     );
@@ -657,7 +661,6 @@ export default function App() {
     return (
       <main className="auth-page">
         <section className="auth-card">
-
           <div className="brand-mark">
             <UserRound size={34} />
           </div>
@@ -669,14 +672,11 @@ export default function App() {
           </p>
 
           <form onSubmit={saveProfile}>
-
             <label>الاسم الظاهر</label>
 
             <input
               value={displayName}
-              onChange={(e) =>
-                setDisplayName(e.target.value)
-              }
+              onChange={(e) => setDisplayName(e.target.value)}
               placeholder="اسمك"
               required
             />
@@ -686,22 +686,14 @@ export default function App() {
             <input
               dir="ltr"
               value={username}
-              onChange={(e) =>
-                setUsername(e.target.value)
-              }
+              onChange={(e) => setUsername(e.target.value)}
               placeholder="username"
               required
             />
 
-            <button
-              className="primary"
-              disabled={busy}
-            >
-              {busy
-                ? "جارٍ الحفظ..."
-                : "حفظ ومتابعة"}
+            <button className="primary" disabled={busy}>
+              {busy ? "جارٍ الحفظ..." : "حفظ ومتابعة"}
             </button>
-
           </form>
 
           <button
@@ -711,10 +703,11 @@ export default function App() {
             تسجيل الخروج
           </button>
 
-          {error && (
-            <p className="error">{error}</p>
-          )}
+          {error && <p className="error">{error}</p>}
 
+          <small className="muted">
+            مشروع Firebase: {projectId}
+          </small>
         </section>
       </main>
     );
@@ -723,9 +716,7 @@ export default function App() {
   // واجهة التطبيق
   return (
     <main className="app-shell">
-
       <header className="topbar">
-
         <div className="brand-inline">
           <div className="small-mark">
             <MessageCircle size={20} />
@@ -744,17 +735,14 @@ export default function App() {
             <LogOut size={19} />
           </button>
         </div>
-
       </header>
 
       <div className="workspace">
-
         <aside
           className={`sidebar ${
             activeChat ? "mobile-hidden" : ""
           }`}
         >
-
           <div className="sidebar-heading">
             <h2>المحادثات</h2>
             <span className="online-dot" />
@@ -765,17 +753,13 @@ export default function App() {
 
             <input
               value={searchText}
-              onChange={(e) =>
-                setSearchText(e.target.value)
-              }
+              onChange={(e) => setSearchText(e.target.value)}
               placeholder="ابحث عن اسم أو اسم مستخدم"
             />
           </div>
 
           {searchText.trim() ? (
-
             <div className="people-list">
-
               <p className="section-label">
                 نتائج البحث
               </p>
@@ -791,8 +775,8 @@ export default function App() {
                   </div>
 
                   <div className="person-info">
-                    <b>{p.displayName}</b>
-                    <small>@{p.username}</small>
+                    <b>{p.displayName || "مستخدم"}</b>
+                    <small>@{p.username || ""}</small>
                   </div>
 
                   <MessageCircle size={18} />
@@ -804,20 +788,14 @@ export default function App() {
                   لا توجد نتائج مطابقة.
                 </p>
               )}
-
             </div>
-
           ) : (
-
             <div className="chat-list">
-
               {chats.map((chat) => (
                 <button
                   key={chat.id}
                   className={`chat-row ${
-                    activeChat?.id === chat.id
-                      ? "selected"
-                      : ""
+                    activeChat?.id === chat.id ? "selected" : ""
                   }`}
                   onClick={() => setActiveChat(chat)}
                 >
@@ -834,7 +812,6 @@ export default function App() {
                       {chat.lastMessage || "ابدأ المحادثة"}
                     </small>
                   </div>
-
                 </button>
               ))}
 
@@ -847,12 +824,10 @@ export default function App() {
                   </small>
                 </div>
               )}
-
             </div>
           )}
 
           <div className="my-profile">
-
             <div className="avatar self">
               {profile.displayName.slice(0, 1)}
             </div>
@@ -863,9 +838,7 @@ export default function App() {
             </div>
 
             <Check size={17} />
-
           </div>
-
         </aside>
 
         <section
@@ -873,13 +846,9 @@ export default function App() {
             !activeChat ? "no-chat" : ""
           }`}
         >
-
           {activeChat ? (
-
             <>
-
               <div className="conversation-header">
-
                 <button
                   className="back-button"
                   onClick={() => setActiveChat(null)}
@@ -900,34 +869,29 @@ export default function App() {
                     @{activeChat.other?.username || ""}
                   </small>
                 </div>
-
               </div>
 
               <div className="messages-area">
-
                 {messages.map((m) => (
                   <div
                     key={m.id}
                     className={`message ${
-                      m.senderId === user.uid
-                        ? "mine"
-                        : "theirs"
+                      m.senderId === user.uid ? "mine" : "theirs"
                     }`}
                   >
-
                     <p>{m.text}</p>
 
                     <small>
                       {m.createdAt?.toDate
-                        ? m.createdAt
-                            .toDate()
-                            .toLocaleTimeString("ar", {
+                        ? m.createdAt.toDate().toLocaleTimeString(
+                            "ar",
+                            {
                               hour: "2-digit",
                               minute: "2-digit"
-                            })
+                            }
+                          )
                         : "..."}
                     </small>
-
                   </div>
                 ))}
 
@@ -939,21 +903,17 @@ export default function App() {
                 )}
 
                 <div ref={messagesEndRef} />
-
               </div>
 
               <form
                 className="composer"
                 onSubmit={sendMessage}
               >
-
                 <input
                   value={messageText}
-                  onChange={(e) =>
-                    setMessageText(e.target.value)
-                  }
+                  onChange={(e) => setMessageText(e.target.value)}
                   placeholder="اكتب رسالتك..."
-                  maxLength="5000"
+                  maxLength={5000}
                 />
 
                 <button
@@ -963,15 +923,10 @@ export default function App() {
                 >
                   <Send size={20} />
                 </button>
-
               </form>
-
             </>
-
           ) : (
-
             <div className="welcome">
-
               <div className="welcome-icon">
                 <MessageCircle size={52} />
               </div>
@@ -981,13 +936,9 @@ export default function App() {
               <p>
                 اختر محادثة أو ابحث عن مستخدم لبدء التواصل.
               </p>
-
             </div>
-
           )}
-
         </section>
-
       </div>
 
       {error && (
@@ -999,7 +950,6 @@ export default function App() {
           </button>
         </div>
       )}
-
     </main>
   );
 }
