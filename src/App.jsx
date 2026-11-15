@@ -1,4 +1,3 @@
-
 import { useEffect, useRef, useState } from "react";
 
 import {
@@ -199,7 +198,7 @@ export default function App() {
     );
   }, [user, profile]);
 
-  // البحث المباشر في Firestore بدلاً من تحميل أول 100 مستخدم
+  // البحث المباشر في Firestore
   useEffect(() => {
     if (!user || !profile) {
       setProfiles([]);
@@ -365,7 +364,7 @@ export default function App() {
     }
   }
 
-  // حفظ الملف الشخصي
+  // حفظ الملف الشخصي مع التحقق من عدم تكرار اسم المستخدم
   async function saveProfile(event) {
     event.preventDefault();
 
@@ -392,7 +391,17 @@ export default function App() {
         );
       }
 
-      // لا نحفظ البريد داخل profiles لأن قواعد Firestore تمنعه.
+      // التحقق من أن اسم المستخدم غير مأخوذ من قبل شخص آخر
+      const usernameCheckQuery = query(
+        collection(db, "profiles"),
+        where("username", "==", cleanUsername),
+        limit(1)
+      );
+      const existingUserSnap = await getDocs(usernameCheckQuery);
+      if (!existingUserSnap.empty && existingUserSnap.docs[0].id !== user.uid) {
+        throw new Error("اسم المستخدم هذا مستخدم بالفعل، اختر اسمًا آخر.");
+      }
+
       const profileData = {
         displayName: cleanName,
         username: cleanUsername,
@@ -405,7 +414,6 @@ export default function App() {
         profileData
       );
 
-      // البريد الإلكتروني يبقى في مستند المستخدم الخاص.
       await setDoc(
         doc(db, "users", user.uid),
         {
